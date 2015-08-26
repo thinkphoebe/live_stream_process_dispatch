@@ -23,7 +23,7 @@ void* queue_get_block(queue_t *queue, int wait)
         {
             if (wait == 0)
                 return NULL;
-            //printf("read block to from FAILED!\n");
+            //printf("read block to from queue FAILED!\n");
             usleep(20000);
             continue;
         }
@@ -68,6 +68,7 @@ void* memory_pool_get_block(memory_pool_t *memory_pool, int wait)
         {
             if (wait == 0)
                 return NULL;
+            //printf("allocate from memory pool FAILED!\n");
             usleep(20000);
             continue;
         }

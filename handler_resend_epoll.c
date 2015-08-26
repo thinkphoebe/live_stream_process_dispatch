@@ -163,10 +163,13 @@ static void* thread_proc(void *arg)
     int s;
     int32_t socket_fd;
     int32_t data_size;
+    int write_count;
 
     for (; ;)
     {
         n = epoll_wait(h_resend->efd, h_resend->events, MAXEVENTS, -1);
+        write_count = 0;
+
         for (i = 0; i < n; i++)
         {
             if ((h_resend->events[i].events & EPOLLERR) || (h_resend->events[i].events & EPOLLHUP))
@@ -269,7 +272,14 @@ static void* thread_proc(void *arg)
                 {
                     block = h_resend->cb_in(h_resend->param_in, 0);
                     if (block == NULL)
+                    {
+                        //printf("no in block\n");
                         break;
+                    }
+                    //else
+                    //{
+                    //    printf("get block\n");
+                    //}
                     socket_fd = *(int32_t *)block;
                     data_size = *(int32_t *)(block + 4);
                     info = fd_map_get(h_resend->fd_map_in, socket_fd);
@@ -308,7 +318,7 @@ static void* thread_proc(void *arg)
                     else
                     {
                         //printf("AAAAAAAAAAAAAAAAAAAA\n");
-                        usleep(100000);
+                        //usleep(100000);
                         //没有数据可以发送
                         continue;
                     }
@@ -335,21 +345,23 @@ static void* thread_proc(void *arg)
                             if (used == 0)
                             {
                                 info_resend->pkg_head = (info_resend->pkg_head + 1) % PKG_MAX;
+                                h_resend->cb_out(h_resend->param_out, info_resend->pkgs[info_resend->pkg_head], 1);
                                 //printf("cccccc %d, %d\n", info_resend->pkg_head, info_resend->pkg_tail);
                             }
                         }
 
                         client->block_index = (client->block_index + 1) % PKG_MAX;
-                        //printf("UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU %d, %d, %d\n",
-                        //        client->block_index, info_resend->pkg_head, info_resend->pkg_tail);
+                        //printf("UUUUU %d, %d, %d, %d\n", client->fdsend2, client->block_index, info_resend->pkg_head, info_resend->pkg_tail);
                         client->block_addr = info_resend->pkgs[client->block_index] + 8;
                         client->block_size = *(int32_t *)(info_resend->pkgs[client->block_index] + 4);
                         client->block_pos = 0;
                     }
                     else
                     {
-                        //printf("BBBBBBBBBBBBBBBBBBBB\n");
-                        usleep(100000);
+#ifdef UDP
+                        //printf("BBBBB %d, %d, %d, %d\n", client->fdsend2, client->block_index, info_resend->pkg_head, info_resend->pkg_tail);
+#endif
+                        //usleep(10000);
                         //没有数据可以发送
                         continue;
                     }
@@ -366,6 +378,7 @@ static void* thread_proc(void *arg)
                 //printf("DDDDDDDDDDDDDDDDDDDD %p, %d, %d, %d\n", client, client->block_size, client->block_pos, write_size);
 #endif
 
+                write_count += 1;
                 if (write_size <= 0)
                 {
                     continue;
@@ -373,6 +386,12 @@ static void* thread_proc(void *arg)
 
                 client->block_pos += write_size;
             }
+        }
+
+        if (write_count == 0)
+        {
+            //printf("no data write uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu\n");
+            usleep(100000);
         }
     }
 
