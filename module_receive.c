@@ -9,28 +9,21 @@
 #include <unistd.h>
 #include <string.h>
 #include <pthread.h>
-#include "handler_receive.h"
-
-#include <inttypes.h>
 #include <errno.h>
 #include <sys/socket.h>
 #include <netdb.h>
-#include <fcntl.h>
 #include <sys/epoll.h>
+
+#include "module.h"
+#include "module_utils.h"
 
 #define MAXEVENTS 64
 
-typedef struct _handler_receive
+typedef struct _module_receive
 {
-    handler_t handler;
+    module_t handler;
+    module_info_t info;
     int block_size;
-    fd_map_t *fd_map_source;
-    handler_receive_event_t on_event;
-
-    callback_in_t cb_in;
-    callback_out_t cb_out;
-    void *param_in;
-    void *param_out;
 
     pthread_t thrd;
     int exit_flag;
@@ -38,82 +31,12 @@ typedef struct _handler_receive
     struct epoll_event *events;
     int sfd;
     int efd;
-} handler_receive_t;
-
-
-static int create_and_bind(const char *port)
-{
-    struct addrinfo hints;
-    struct addrinfo *result, *rp;
-    int s, sfd;
-
-    memset(&hints, 0, sizeof(struct addrinfo));
-    hints.ai_family = AF_UNSPEC; /* Return IPv4 and IPv6 choices */
-    hints.ai_socktype = SOCK_STREAM; /* We want a TCP socket */
-    hints.ai_flags = AI_PASSIVE; /* All interfaces */
-
-    s = getaddrinfo(NULL, port, &hints, &result);
-    if (s != 0)
-    {
-        printf("getaddrinfo: %s\n", gai_strerror(s));
-        return -1;
-    }
-
-    for (rp = result; rp != NULL; rp = rp->ai_next)
-    {
-        sfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (sfd == -1)
-            continue;
-
-        s = bind(sfd, rp->ai_addr, rp->ai_addrlen);
-        if (s == 0)
-        {
-            //We managed to bind successfully! 
-            break;
-        }
-
-        close(sfd);
-    }
-
-    if (rp == NULL)
-    {
-        printf("Could not bind\n");
-        return -1;
-    }
-
-    freeaddrinfo(result);
-    return sfd;
-}
-
-
-static int make_socket_non_blocking (int sfd)
-{
-    int flags, s;
-
-    //得到文件状态标志
-    flags = fcntl(sfd, F_GETFL, 0);
-    if (flags == -1)
-    {
-        printf("fnctl F_GETFL got error: %s", strerror(errno));
-        return -1;
-    }
-
-    //设置文件状态标志
-    flags |= O_NONBLOCK;
-    s = fcntl(sfd, F_SETFL, flags);
-    if (s == -1)
-    {
-        printf("fnctl F_SETFL got error: %s", strerror(errno));
-        return -1;
-    }
-
-    return 0;
-}
+} module_receive_t;
 
 
 static void* thread_proc(void *arg)
 {
-    handler_receive_t *h_receive = (handler_receive_t *)arg;
+    module_receive_t *h_receive = (module_receive_t *)arg;
     void *block = NULL;
     int32_t read_size;
     void *p_data;
@@ -188,22 +111,22 @@ static void* thread_proc(void *arg)
                         continue;
                     }
 
-                    source_info_t *info = (source_info_t *)malloc(sizeof(source_info_t));
+                    modules_data_t *info = (modules_data_t *)malloc(sizeof(modules_data_t));
                     if (info == NULL)
                     {
                         close(infd);
                         continue;
                     }
                     memset(info, 0, sizeof(*info));
-                    info->fd = infd;
-                    if (fd_map_add(h_receive->fd_map_source, infd, info) != 0)
+                    info->key = infd;
+                    if (map_add(h_receive->info.map_data, infd, info) != 0)
                     {
                         free(info);
                         close(infd);
                         continue;
                     }
 
-                    h_receive->on_event(0, infd);
+                    h_receive->info.send_event(h_receive->info.h_event, &h_receive->handler, EVENT_SRC_ADD, (void *)infd);
                 }
             }
             else
@@ -219,7 +142,7 @@ static void* thread_proc(void *arg)
                 {
                     if (block == NULL)
                     {
-                        block = h_receive->cb_in(h_receive->param_in, 1);
+                        block = h_receive->info.cb_in(h_receive->info.param_in, 1);
                         p_data = block + 8;
                         read_size = 0;
                     }
@@ -250,7 +173,7 @@ static void* thread_proc(void *arg)
                         //memcpy(block, &h_receive->events[i].data.fd, 4);
                         //memcpy(block + 4, &read_size, 4);
                         //printf("aaa %d\n", read_size);
-                        h_receive->cb_out(h_receive->param_out, block, 1);
+                        h_receive->info.cb_out(h_receive->info.param_out, block, 1);
                         block = NULL;
                     }
                 }
@@ -262,7 +185,7 @@ static void* thread_proc(void *arg)
                     //memcpy(block, &h_receive->events[i].data.fd, 4);
                     //memcpy(block + 4, &read_size, 4);
                     //printf("bbb %d\n", read_size);
-                    h_receive->cb_out(h_receive->param_out, block, 1);
+                    h_receive->info.cb_out(h_receive->info.param_out, block, 1);
                 }
 
                 if (done)
@@ -276,11 +199,11 @@ static void* thread_proc(void *arg)
 
                     //TODO !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 #if 0
-                    source_info_t *info = fd_map_get(h_receive->fd_map_source, fd);
+                    modules_data_t *info = fd_map_get(h_receive->fd_map_source, fd);
                     if (fd_map_remove(h_receive->fd_map_source, fd) != 0)
                     {
                     }
-                    h_receive->on_event(1, fd);
+                    h_receive->info.send_event(h_receive->info.h_event, &h_receive->handler, EVENT_SRC_DEL, (void *)fd);
                     free(info);
 #endif
                     close(fd);
@@ -293,9 +216,9 @@ static void* thread_proc(void *arg)
 }
 
 
-static int receive_start(handler_t *h)
+static int receive_start(module_t *h)
 {
-    handler_receive_t *h_receive = (handler_receive_t *)h;
+    module_receive_t *h_receive = (module_receive_t *)h;
     if (h_receive->thrd != 0)
     {
         printf("[%d] already started\n", __LINE__);
@@ -310,9 +233,9 @@ static int receive_start(handler_t *h)
 }
 
 
-static void receive_destroy(handler_t *h)
+static void receive_destroy(module_t *h)
 {
-    handler_receive_t *h_receive = (handler_receive_t *)h;
+    module_receive_t *h_receive = (module_receive_t *)h;
     if (h_receive->thrd != 0)
     {
         h_receive->exit_flag = 1;
@@ -329,43 +252,30 @@ static void receive_destroy(handler_t *h)
 }
 
 
-static void receive_set_callback_in(handler_t *h, callback_in_t callback, void *param)
+static void receive_on_event(module_t *h, int event_id, void *event_data)
 {
-    handler_receive_t *h_receive = (handler_receive_t *)h;
-    h_receive->cb_in = callback;
-    h_receive->param_in = param;
 }
 
 
-static void receive_set_callback_out(handler_t *h, callback_out_t callback, void *param)
+module_t* module_receive_create(const module_info_t *info, int block_size, int port)
 {
-    handler_receive_t *h_receive = (handler_receive_t *)h;
-    h_receive->cb_out = callback;
-    h_receive->param_out = param;
-}
-
-
-handler_t* handler_receive_create(int block_size, int port, fd_map_t *fd_map_source, handler_receive_event_t on_event)
-{
-    handler_receive_t *h_receive;
-    char port_str[16];
+    module_receive_t *h_receive;
     struct epoll_event event;
+    char port_str[16];
     int s;
 
-    h_receive = (handler_receive_t *)malloc(sizeof(handler_receive_t));
+    h_receive = (module_receive_t *)malloc(sizeof(module_receive_t));
     if (h_receive == NULL)
     {
         printf("malloc FAILED!\n");
         return NULL;
     }
     memset(h_receive, 0, sizeof(*h_receive));
+    h_receive->info = *info;
     h_receive->block_size = block_size;
     h_receive->handler.start = receive_start;
     h_receive->handler.destroy = receive_destroy;
-    h_receive->handler.set_callback_in = receive_set_callback_in;
-    h_receive->handler.set_callback_out = receive_set_callback_out;
-    h_receive->fd_map_source = fd_map_source;
-    h_receive->on_event = on_event;
+    h_receive->handler.on_event = receive_on_event;
 
     snprintf(port_str, 16, "%d", port);
     h_receive->sfd = create_and_bind(port_str);

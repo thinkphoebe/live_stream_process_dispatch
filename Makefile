@@ -1,6 +1,5 @@
 default:
-	gcc -g -Wall -o cds_demo memory_pool.c queue.c handler_common.c handler_receive.c handler_resend_epoll.c handler_process.c main.c -lpthread
-	#gcc -g -Wall -o cds_demo memory_pool.c queue.c handler_common.c handler_receive.c handler_resend.c handler_process.c main.c -lpthread
+	gcc -g -Wall -o demo_app memory_pool.c queue.c map.c module_utils.c module_receive.c module_resend.c module_process.c demo_app.c -lpthread
 
 memtest:
 	gcc -o memtest memtest.c -lpthread 

@@ -9,7 +9,27 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <string.h>
-#include "handler_common.h"
+#include <errno.h>
+#include <netdb.h>
+#include <fcntl.h>
+#include "module_utils.h"
+
+
+int set_module_data(modules_data_t *d, int module_id, void *data)
+{
+    if (module_id < 0 || module_id >= MODULES_MAX)
+        return -1;
+    d->modules[module_id] = data;
+    return 0;
+}
+
+
+void* get_module_data(modules_data_t *d, int module_id)
+{
+    if (module_id < 0 || module_id >= MODULES_MAX)
+        return NULL;
+    return d->modules[module_id];
+}
 
 
 void* queue_get_block(queue_t *queue, int wait)
@@ -84,73 +104,71 @@ int memory_pool_put_block(memory_pool_t *memory_pool, void *block, int wait)
 }
 
 
-
-struct _fd_map
+int create_and_bind(const char *port)
 {
-    int max_fd;
-    void **fds;
-};
+    struct addrinfo hints;
+    struct addrinfo *result, *rp;
+    int s, sfd;
 
+    memset(&hints, 0, sizeof(struct addrinfo));
+    hints.ai_family = AF_UNSPEC; /* Return IPv4 and IPv6 choices */
+    hints.ai_socktype = SOCK_STREAM; /* We want a TCP socket */
+    hints.ai_flags = AI_PASSIVE; /* All interfaces */
 
-fd_map_t* fd_map_create(int max_fd)
-{
-    fd_map_t *h = (fd_map_t *)malloc(sizeof(fd_map_t));
-    if (h == NULL)
+    s = getaddrinfo(NULL, port, &hints, &result);
+    if (s != 0)
     {
-        return NULL;
-    }
-    memset(h, 0, sizeof(*h));
-
-    h->max_fd = max_fd;
-    h->fds = malloc(sizeof(void *) * (max_fd + 1));
-    if (h->fds == NULL)
-    {
-        free(h);
-        return NULL;
-    }
-    memset(h->fds, 0, sizeof(void *) * (max_fd + 1));
-    return h;
-}
-
-
-void fd_map_destroy(fd_map_t *h)
-{
-    free(h->fds);
-    free(h);
-}
-
-
-int fd_map_add(fd_map_t *h, int fd, void *info)
-{
-    if (fd < 0 || fd > h->max_fd)
-    {
-        printf("[add] fd [%d] exceed max_fd [%d]\n", fd, h->max_fd);
+        printf("getaddrinfo: %s\n", gai_strerror(s));
         return -1;
     }
-    h->fds[fd] = info;
-    return 0;
-}
 
-
-int fd_map_remove(fd_map_t *h, int fd)
-{
-    if (fd < 0 || fd > h->max_fd)
+    for (rp = result; rp != NULL; rp = rp->ai_next)
     {
-        printf("[remove] fd [%d] exceed max_fd [%d]\n", fd, h->max_fd);
+        sfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (sfd == -1)
+            continue;
+
+        s = bind(sfd, rp->ai_addr, rp->ai_addrlen);
+        if (s == 0)
+        {
+            //We managed to bind successfully! 
+            break;
+        }
+
+        close(sfd);
+    }
+
+    if (rp == NULL)
+    {
+        printf("Could not bind\n");
         return -1;
     }
-    h->fds[fd] = NULL;
+
+    freeaddrinfo(result);
+    return sfd;
+}
+
+
+int make_socket_non_blocking (int sfd)
+{
+    int flags, s;
+
+    //得到文件状态标志
+    flags = fcntl(sfd, F_GETFL, 0);
+    if (flags == -1)
+    {
+        printf("fnctl F_GETFL got error: %s", strerror(errno));
+        return -1;
+    }
+
+    //设置文件状态标志
+    flags |= O_NONBLOCK;
+    s = fcntl(sfd, F_SETFL, flags);
+    if (s == -1)
+    {
+        printf("fnctl F_SETFL got error: %s", strerror(errno));
+        return -1;
+    }
+
     return 0;
 }
-
-
-void* fd_map_get(fd_map_t *h, int fd)
-{
-    if (fd < 0 || fd > h->max_fd)
-    {
-        printf("[get] fd [%d] exceed max_fd [%d]\n", fd, h->max_fd);
-        return NULL;
-    }
-    return h->fds[fd];
-}
-

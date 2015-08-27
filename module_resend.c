@@ -11,7 +11,9 @@
 #include <pthread.h>
 #include <sys/socket.h>
 #include <netdb.h>
-#include "handler_resend.h"
+
+#include "module.h"
+#include "module_utils.h"
 
 #include <inttypes.h>
 #include <errno.h>
@@ -29,17 +31,12 @@
 
 //#define UDP
 
-typedef struct _handler_resend
+typedef struct _module_resend
 {
-    handler_t handler;
-    int block_size;
-    fd_map_t *fd_map_in;
-    fd_map_t *fd_map_out;
+    module_t handler;
+    module_info_t info;
 
-    callback_in_t cb_in;
-    callback_out_t cb_out;
-    void *param_in;
-    void *param_out;
+    map_t *map_out;
 
     pthread_t thrd;
     int exit_flag;
@@ -52,7 +49,7 @@ typedef struct _handler_resend
 
     int fdin_1;
     int fdin_2;
-} handler_resend_t;
+} module_resend_t;
 
 typedef struct _client_t 
 {
@@ -65,7 +62,7 @@ typedef struct _client_t
     int block_size;
     int block_pos;
 
-    source_info_t *p_srcinfo;
+    modules_data_t *p_srcinfo;
 } client_t;
 
 typedef struct _info_resend
@@ -81,82 +78,12 @@ typedef struct _info_resend
 } info_resend_t;
 
 
-static int create_and_bind(const char *port)
-{
-    struct addrinfo hints;
-    struct addrinfo *result, *rp;
-    int s, sfd;
-
-    memset(&hints, 0, sizeof(struct addrinfo));
-    hints.ai_family = AF_UNSPEC; /* Return IPv4 and IPv6 choices */
-    hints.ai_socktype = SOCK_STREAM; /* We want a TCP socket */
-    hints.ai_flags = AI_PASSIVE; /* All interfaces */
-
-    s = getaddrinfo(NULL, port, &hints, &result);
-    if (s != 0)
-    {
-        printf("getaddrinfo: %s\n", gai_strerror(s));
-        return -1;
-    }
-
-    for (rp = result; rp != NULL; rp = rp->ai_next)
-    {
-        sfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (sfd == -1)
-            continue;
-
-        s = bind(sfd, rp->ai_addr, rp->ai_addrlen);
-        if (s == 0)
-        {
-            //We managed to bind successfully! 
-            break;
-        }
-
-        close(sfd);
-    }
-
-    if (rp == NULL)
-    {
-        printf("Could not bind\n");
-        return -1;
-    }
-
-    freeaddrinfo(result);
-    return sfd;
-}
-
-
-static int make_socket_non_blocking (int sfd)
-{
-    int flags, s;
-
-    //得到文件状态标志
-    flags = fcntl(sfd, F_GETFL, 0);
-    if (flags == -1)
-    {
-        printf("fnctl F_GETFL got error: %s", strerror(errno));
-        return -1;
-    }
-
-    //设置文件状态标志
-    flags |= O_NONBLOCK;
-    s = fcntl(sfd, F_SETFL, flags);
-    if (s == -1)
-    {
-        printf("fnctl F_SETFL got error: %s", strerror(errno));
-        return -1;
-    }
-
-    return 0;
-}
-
-
 static void* thread_proc(void *arg)
 {
-    handler_resend_t *h_resend = (handler_resend_t *)arg;
+    module_resend_t *h_resend = (module_resend_t *)arg;
     void *block = NULL;
     int write_size;
-    source_info_t *info;
+    modules_data_t *info;
     info_resend_t *info_resend;
     int n, i, k;
     struct epoll_event event;
@@ -177,7 +104,7 @@ static void* thread_proc(void *arg)
                 //An error has occured on this fd, or the socket is not ready for reading (why were we notified then?) 
                 printf("resend epoll error\n");
                 close (h_resend->events[i].data.fd);
-                fd_map_remove(h_resend->fd_map_out, h_resend->events[i].data.fd);
+                map_remove(h_resend->map_out, h_resend->events[i].data.fd);
                 continue;
             }
             else if (h_resend->sfd == h_resend->events[i].data.fd)
@@ -237,28 +164,29 @@ static void* thread_proc(void *arg)
 
                     //TODO: 根据请求的信息，将这个client分配到某个source. 
                     //这里测试简单起见, 记录下第一、第二个source, 随机分配到这两个
-                    source_info_t *info;
+                    modules_data_t *info;
                     if (atoi(sbuf) % 2 == 0)
-                        info = fd_map_get(h_resend->fd_map_in, h_resend->fdin_1);
+                        info = map_get(h_resend->info.map_data, h_resend->fdin_1);
                     else
-                        info = fd_map_get(h_resend->fd_map_in, h_resend->fdin_2);
+                        info = map_get(h_resend->info.map_data, h_resend->fdin_2);
+                    info_resend = get_module_data(info, MODULE_RESEND);
 
 
-                    if (((info_resend_t *)info->info_resend)->client_count > MAXCLIENTS)
+                    if (info_resend->client_count > MAXCLIENTS)
                     {
                         close(infd);
                         continue;
                     }
                     client_t *client;
-                    client = &((info_resend_t *)info->info_resend)->clients[((info_resend_t *)info->info_resend)->client_count];
-                    ((info_resend_t *)info->info_resend)->client_count += 1;
+                    client = &info_resend->clients[info_resend->client_count];
+                    info_resend->client_count += 1;
                     client->block_addr = NULL;
                     client->block_pos = 0;
                     client->block_size = 0;
                     client->block_index = -1;
                     client->p_srcinfo = info;
 
-                    if (fd_map_add(h_resend->fd_map_out, infd, client) != 0)
+                    if (map_add(h_resend->map_out, infd, client) != 0)
                     {
                        free(info);
                        close(infd);
@@ -270,7 +198,7 @@ static void* thread_proc(void *arg)
             {
                 for (; ;)
                 {
-                    block = h_resend->cb_in(h_resend->param_in, 0);
+                    block = h_resend->info.cb_in(h_resend->info.param_in, 0);
                     if (block == NULL)
                     {
                         //printf("no in block\n");
@@ -282,12 +210,12 @@ static void* thread_proc(void *arg)
                     //}
                     socket_fd = *(int32_t *)block;
                     data_size = *(int32_t *)(block + 4);
-                    info = fd_map_get(h_resend->fd_map_in, socket_fd);
-                    info_resend = (info_resend_t *)info->info_resend;
+                    info = map_get(h_resend->info.map_data, socket_fd);
+                    info_resend = get_module_data(info, MODULE_RESEND);
 
                     if (info_resend->client_count <= 0)
                     {
-                        h_resend->cb_out(h_resend->param_out, block, 1);
+                        h_resend->info.cb_out(h_resend->info.param_out, block, 1);
                         continue;
                     }
 
@@ -301,9 +229,9 @@ static void* thread_proc(void *arg)
                     //printf("bbbbbb %d, %d, %d\n", info_resend->pkg_head, info_resend->pkg_tail, data_size);
                 }
 
-                client_t *client = fd_map_get(h_resend->fd_map_out, h_resend->events[i].data.fd);
+                client_t *client = map_get(h_resend->map_out, h_resend->events[i].data.fd);
                 info = client->p_srcinfo;
-                info_resend = (info_resend_t *)info->info_resend;
+                info_resend = get_module_data(info, MODULE_RESEND);
 
                 if (client->block_index < 0)
                 {
@@ -345,7 +273,7 @@ static void* thread_proc(void *arg)
                             if (used == 0)
                             {
                                 info_resend->pkg_head = (info_resend->pkg_head + 1) % PKG_MAX;
-                                h_resend->cb_out(h_resend->param_out, info_resend->pkgs[info_resend->pkg_head], 1);
+                                h_resend->info.cb_out(h_resend->info.param_out, info_resend->pkgs[info_resend->pkg_head], 1);
                                 //printf("cccccc %d, %d\n", info_resend->pkg_head, info_resend->pkg_tail);
                             }
                         }
@@ -399,9 +327,9 @@ static void* thread_proc(void *arg)
 }
 
 
-static int resend_start(handler_t *h)
+static int resend_start(module_t *h)
 {
-    handler_resend_t *h_resend = (handler_resend_t *)h;
+    module_resend_t *h_resend = (module_resend_t *)h;
     if (h_resend->thrd != 0)
     {
         printf("[%d] already started\n", __LINE__);
@@ -416,9 +344,9 @@ static int resend_start(handler_t *h)
 }
 
 
-static void resend_destroy(handler_t *h)
+static void resend_destroy(module_t *h)
 {
-    handler_resend_t *h_resend = (handler_resend_t *)h;
+    module_resend_t *h_resend = (module_resend_t *)h;
     if (h_resend->thrd != 0)
     {
         h_resend->exit_flag = 1;
@@ -427,35 +355,116 @@ static void resend_destroy(handler_t *h)
     }
     free(h_resend->events);
     close(h_resend->efd);
-    fd_map_destroy(h_resend->fd_map_out);
+    map_destroy(h_resend->map_out);
     free(h);
 }
 
 
-static void resend_set_callback_in(handler_t *h, callback_in_t callback, void *param)
+static void resend_on_event(module_t *h, int event_id, void *event_data)
 {
-    handler_resend_t *h_resend = (handler_resend_t *)h;
-    h_resend->cb_in = callback;
-    h_resend->param_in = param;
+    module_resend_t *h_resend = (module_resend_t *)h;
+    modules_data_t *info;
+    info_resend_t *info_resend;
+
+    info = map_get(h_resend->info.map_data, (int)event_data);
+
+    if (event_id == EVENT_SRC_ADD)
+    {
+        info_resend = get_module_data(info, MODULE_RESEND);
+        if (info_resend == NULL)
+        {
+            info_resend = (info_resend_t *)malloc(sizeof(info_resend_t));
+            if (info_resend == NULL)
+            {
+            }
+            memset(info_resend, 0, sizeof(sizeof(info_resend_t)));
+            set_module_data(info, MODULE_RESEND, info_resend);
+        }
+
+#ifdef UDP
+        if (info_resend->client_count > MAXCLIENTS)
+            return;
+
+        client_t *client;
+        int i;
+        for (i = 0; i < 2; i++) //添加两个用做测试
+        {
+            uint32_t dest_ip;
+            uint16_t dest_port;
+
+            //测试方便起见，转发到固定端口.
+            dest_port = htons(10000 + i * 10000 + fd);
+
+            //这里将少数流转发到外部机器，用来检验正确性，其他发到本机
+            if (h_resend->out_count < 2)
+            {
+                dest_ip = inet_addr("172.16.15.89");
+                printf("=================================> stream send to 172.16.15.89 port:%d\n", 10000 + i * 10000 + fd);
+                h_resend->out_count += 1;
+            }
+            else
+                dest_ip = inet_addr("127.0.0.1");
+
+            client = &info_resend->clients[i];
+            client->send2.sin_family = AF_INET;
+            client->send2.sin_addr.s_addr = dest_ip;
+            client->send2.sin_port = dest_port;
+            client->p_srcinfo = info;
+
+            client->block_addr = NULL;
+            client->block_pos = 0;
+            client->block_size = 0;
+            client->block_index = -1;
+
+            client->fdsend2 = socket(AF_INET, SOCK_DGRAM, 0);
+            if (client->fdsend2 < 0)
+            {
+            }
+            info_resend->client_count += 1;
+
+
+            struct epoll_event event;
+            event.data.fd = client->fdsend2;
+            //event.events = EPOLLOUT | EPOLLET;
+            event.events = EPOLLOUT;
+            int s = epoll_ctl(h_resend->efd, EPOLL_CTL_ADD, client->fdsend2, &event);
+            if (s == -1)
+            {
+                //printf("epoll_ctl error:%s\n", strerror(errno));
+                ////abort ();
+                //close(client->fdsend2);
+                //continue;
+            }
+
+            if (map_add(h_resend->map_out, client->fdsend2, client) != 0)
+            {
+                //free(info);
+                //close(infd);
+                //continue;
+            }
+        }
+#else
+        if (h_resend->fdin_1 == 0)
+            h_resend->fdin_1 = (int)event_data;
+        else if (h_resend->fdin_2 == 0)
+            h_resend->fdin_2 = (int)event_data;
+#endif
+    }
+    else if (event_id == EVENT_SRC_DEL)
+    {
+        //TODO !!!!!!
+    }
 }
 
 
-static void resend_set_callback_out(handler_t *h, callback_out_t callback, void *param)
+module_t* module_resend_create(const module_info_t *info)
 {
-    handler_resend_t *h_resend = (handler_resend_t *)h;
-    h_resend->cb_out = callback;
-    h_resend->param_out = param;
-}
-
-
-handler_t* handler_resend_create(int block_size, fd_map_t *fd_map_in)
-{
-    handler_resend_t *h_resend;
+    module_resend_t *h_resend;
     char port_str[16];
     struct epoll_event event;
     int s;
 
-    h_resend = (handler_resend_t *)malloc(sizeof(handler_resend_t));
+    h_resend = (module_resend_t *)malloc(sizeof(module_resend_t));
     if (h_resend == NULL)
     {
         printf("malloc FAILED!\n");
@@ -463,12 +472,10 @@ handler_t* handler_resend_create(int block_size, fd_map_t *fd_map_in)
     }
     memset(h_resend, 0, sizeof(*h_resend));
 
-    h_resend->block_size = block_size;
-    h_resend->fd_map_in = fd_map_in;
+    h_resend->info = *info;
     h_resend->handler.start = resend_start;
     h_resend->handler.destroy = resend_destroy;
-    h_resend->handler.set_callback_in = resend_set_callback_in;
-    h_resend->handler.set_callback_out = resend_set_callback_out;
+    h_resend->handler.on_event = resend_on_event;
 
     //除了参数size被忽略外,此函数和epoll_create完全相同
     h_resend->efd = epoll_create1(0);
@@ -524,8 +531,8 @@ handler_t* handler_resend_create(int block_size, fd_map_t *fd_map_in)
         goto FAIL;
     }
 
-    h_resend->fd_map_out = fd_map_create(MAX_FD);
-    if (h_resend->fd_map_out == NULL)
+    h_resend->map_out = map_create(MAX_FD);
+    if (h_resend->map_out == NULL)
     {
         goto FAIL;
     }
@@ -535,96 +542,5 @@ handler_t* handler_resend_create(int block_size, fd_map_t *fd_map_in)
 FAIL:
     resend_destroy(&h_resend->handler);
     return NULL;
-}
-
-
-void handler_resend_on_event(handler_t *h, int type, int fd)
-{
-    handler_resend_t *h_resend = (handler_resend_t *)h;
-    source_info_t *info;
-
-    info = fd_map_get(h_resend->fd_map_in, fd);
-
-    if (type == 0)
-    {
-        info->info_resend = (info_resend_t *)malloc(sizeof(info_resend_t));
-        if (info->info_resend == NULL)
-        {
-        }
-        memset(info->info_resend, 0, sizeof(sizeof(info_resend_t)));
-
-#ifdef UDP
-        if (((info_resend_t *)info->info_resend)->client_count > MAXCLIENTS)
-            return;
-
-        client_t *client;
-        int i;
-        for (i = 0; i < 2; i++) //添加两个用做测试
-        {
-            uint32_t dest_ip;
-            uint16_t dest_port;
-
-            //测试方便起见，转发到固定端口.
-            dest_port = htons(10000 + i * 10000 + fd);
-
-            //这里将少数流转发到外部机器，用来检验正确性，其他发到本机
-            if (h_resend->out_count < 2)
-            {
-                dest_ip = inet_addr("172.16.15.89");
-                printf("=================================> stream send to 172.16.15.89 port:%d\n", 10000 + i * 10000 + fd);
-                h_resend->out_count += 1;
-            }
-            else
-                dest_ip = inet_addr("127.0.0.1");
-
-            client = &((info_resend_t *)info->info_resend)->clients[i];
-            client->send2.sin_family = AF_INET;
-            client->send2.sin_addr.s_addr = dest_ip;
-            client->send2.sin_port = dest_port;
-            client->p_srcinfo = info;
-
-            client->block_addr = NULL;
-            client->block_pos = 0;
-            client->block_size = 0;
-            client->block_index = -1;
-
-            client->fdsend2 = socket(AF_INET, SOCK_DGRAM, 0);
-            if (client->fdsend2 < 0)
-            {
-            }
-            ((info_resend_t *)info->info_resend)->client_count += 1;
-
-
-            struct epoll_event event;
-            event.data.fd = client->fdsend2;
-            //event.events = EPOLLOUT | EPOLLET;
-            event.events = EPOLLOUT;
-            int s = epoll_ctl(h_resend->efd, EPOLL_CTL_ADD, client->fdsend2, &event);
-            if (s == -1)
-            {
-                //printf("epoll_ctl error:%s\n", strerror(errno));
-                ////abort ();
-                //close(client->fdsend2);
-                //continue;
-            }
-
-            if (fd_map_add(h_resend->fd_map_out, client->fdsend2, client) != 0)
-            {
-                //free(info);
-                //close(infd);
-                //continue;
-            }
-        }
-#else
-        if (h_resend->fdin_1 == 0)
-            h_resend->fdin_1 = fd;
-        else if (h_resend->fdin_2 == 0)
-            h_resend->fdin_2 = fd;
-#endif
-    }
-    else if (type == 1)
-    {
-        //TODO !!!!!!
-    }
 }
 
