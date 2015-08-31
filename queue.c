@@ -1,5 +1,5 @@
 /**
- * @brief 
+ * @brief buffer queue
  * @author Ye Shengnan
  * @date 2015-08-17 created
 

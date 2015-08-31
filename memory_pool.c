@@ -1,8 +1,9 @@
 /**
- * @brief 
+ * @brief a simple memory pool of fixed block size
  * @author Ye Shengnan
  * @date 2015-08-17 created
  */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,9 +19,10 @@ struct _memory_pool
 {
     int block_size;
     int max_blocks;
+    int allocated_blocks;
 
     int arrays_count;
-    int arrays_allocated;
+    int allocated_arrays;
     void **p_arrays;
 
     void* unused_blocks[ARRAY_BLOCKS];
@@ -72,9 +74,35 @@ FAIL:
 }
 
 
+static void memory_pool_check(memory_pool_t *h)
+{
+    uint8_t *queue_buf;
+    int queue_buf_size;
+    int count = 0;
+
+    printf("================ memory pool info begin ================\n");
+    printf("block size:%d, max blocks:%d, arrays count:%d, arrays allocated:%d, array blocks:%d\n",
+            h->block_size, h->max_blocks, h->arrays_count, h->allocated_arrays, ARRAY_BLOCKS);
+
+    for (; ;)
+    {
+        if (queue_get_readbuf(h->queue, &queue_buf, &queue_buf_size) != 0)
+            break;
+        queue_read_complete(h->queue);
+        count += 1;
+    }
+    printf("allocated blocks:%d, released blocks:%d, remain:%d\n", h->allocated_blocks, count,
+            h->allocated_blocks - count);
+    printf("================ memory pool info end ================\n");
+}
+
+
 void memory_pool_destroy(memory_pool_t *h)
 {
     int i;
+
+    memory_pool_check(h);
+
     for (i = 0; i < h->arrays_count; i++)
         free(h->p_arrays[i]);
     free(h->p_arrays);
@@ -93,7 +121,6 @@ void* memory_pool_alloc(memory_pool_t *h)
     if (queue_get_readbuf(h->queue, &queue_buf, &queue_buf_size) == 0)
     {
         block = *(void **)queue_buf;
-        //memcpy(&block, queue_buf, sizeof(void *));
         queue_read_complete(h->queue);
         return block;
     }
@@ -101,10 +128,11 @@ void* memory_pool_alloc(memory_pool_t *h)
     if (h->unused_blocks_count > 0)
     {
         h->unused_blocks_count -= 1;
+        h->allocated_blocks += 1;
         return h->unused_blocks[h->unused_blocks_count];
     }
 
-    if (h->arrays_allocated < h->arrays_count)
+    if (h->allocated_arrays < h->arrays_count)
     {
         void *array = malloc(h->block_size * ARRAY_BLOCKS);
         int i;
@@ -114,11 +142,12 @@ void* memory_pool_alloc(memory_pool_t *h)
             return NULL;
         }
         for (i = 1; i < ARRAY_BLOCKS; i++)
-            h->unused_blocks[i] = array + i * h->block_size;
+            h->unused_blocks[i - 1] = array + i * h->block_size;
         h->unused_blocks_count = ARRAY_BLOCKS - 1;
 
-        h->p_arrays[h->arrays_allocated] = array;
-        h->arrays_allocated += 1;
+        h->p_arrays[h->allocated_arrays] = array;
+        h->allocated_arrays += 1;
+        h->allocated_blocks += 1;
         return array;
     }
 
@@ -138,7 +167,6 @@ int memory_pool_free(memory_pool_t *h, void *block)
         return -1;
     }
 
-    //memcpy(queue_buf, &block, sizeof(void *));
     *(void **)queue_buf = block;
     queue_write_complete(h->queue, queue_buf, sizeof(void *), 0);
     return 0;

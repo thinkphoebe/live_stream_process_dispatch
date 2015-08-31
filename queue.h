@@ -1,7 +1,10 @@
 /**
- * @brief 
+ * @brief buffer queue
  * @author Ye Shengnan
  * @date 2015-08-17 created
+ *
+ * In some platform, such as intel, read and write could be in different threads.
+ * memtest.c could be used to test this case.
  */
 
 #ifndef __QUEUE_H__

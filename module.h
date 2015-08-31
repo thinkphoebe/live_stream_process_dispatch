@@ -1,5 +1,5 @@
 /**
- * @brief 
+ * @brief common header for modules
  * @author Ye Shengnan
  * @date 2015-08-17 created
  */
@@ -16,13 +16,22 @@ extern "C" {
 #include "queue.h"
 #include "map.h"
 
-#define MODULES_MAX 5
+#define MODULES_MAX 3
 
-#define EVENT_SRC_ADD 0
-#define EVENT_SRC_DEL 1
+#define MODULE_RECEIVE 0
+#define MODULE_RESEND  1
+#define MODULE_PROCESS 2
 
-typedef void* (*callback_in_t)(void *param, int wait);
-typedef int (*callback_out_t)(void *param, void *block, int wait);
+//block fd为0时为event，后面4字节不是data size，是event id，再后面数据随具体event定义，但应注意不超过block_size大小
+#define BLOCK_FD(buf)           (*(int32_t *)buf)
+#define BLOCK_DATA_SIZE(buf)    (*(int32_t *)(buf + 4))
+#define BLOCK_DATA(buf)         (buf + 8)
+
+#define EVENT_SRC_ADD 0 //后面4字节为fd
+#define EVENT_SRC_DEL 1 //后面4字节为fd
+
+typedef void* (*callback_in_t)(void *param, int timeout);
+typedef int (*callback_out_t)(void *param, void *block, int timeout);
 
 typedef struct _module module_t;
 
@@ -30,7 +39,6 @@ struct _module
 {
     int (*start)(module_t *h);
     void (*destroy)(module_t *h);
-    void (*on_event)(module_t *h, int event_id, void *event_data);
 };
 
 typedef struct _module_info 
@@ -42,9 +50,6 @@ typedef struct _module_info
     callback_out_t cb_out;
     void *param_in;
     void *param_out;
-
-    void *h_event;
-    void (*send_event)(void *h_event, module_t *sender, int event_id, void *event_data);
 } module_info_t;
 
 typedef struct _modules_data
@@ -54,12 +59,10 @@ typedef struct _modules_data
 } modules_data_t;
 
 
-#define MODULE_RECEIVE 0
-#define MODULE_RESEND 1
-#define MODULE_PROCESS 2
-
+//ATTENTION: 注意pipe line的规划，modules_data_t在module receive中分配(第一个节点)，
+//在module process中释放(最后一个节点)
 module_t* module_receive_create(const module_info_t *info, int block_size, int port);
-module_t* module_resend_create(const module_info_t *info);
+module_t* module_resend_create(const module_info_t *info, int port);
 module_t* module_process_create(const module_info_t *info);
 
 
