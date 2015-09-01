@@ -101,7 +101,7 @@ static void remove_client(module_resend_t *h_resend, int fd)
         if (q->fd == fd)
         {
             if (p == NULL)
-                info_resend->p_clients = NULL;
+                info_resend->p_clients = q->p_next;
             else
                 p->p_next = q->p_next;
             free(q);
@@ -351,10 +351,10 @@ static void* thread_proc(void *arg)
                     //TODO: 根据请求的信息，将这个client分配到某个source. 
                     //这里测试简单起见, 记录下第一、第二个source, 随机分配到这两个
                     modules_data_t *info;
-                    //if (atoi(sbuf) % 2 == 0)
+                    if (atoi(sbuf) % 2 == 0)
                         info = map_get(h_resend->info.map_data, h_resend->fdin_1);
-                    //else
-                    //    info = map_get(h_resend->info.map_data, h_resend->fdin_2);
+                    else
+                        info = map_get(h_resend->info.map_data, h_resend->fdin_2);
                     if (info == NULL) //没有source的情况
                     {
                         close(in_fd);
@@ -440,11 +440,6 @@ static void* thread_proc(void *arg)
                             }
                         }
 
-                        if (p == NULL)
-                        {
-                            printf("aaaaaaaaaaaaaaaaaaaaaaaaaaaa\n");
-                            exit(0);
-                        }
                         client->block_addr = p;
                         client->data_addr = BLOCK_DATA(p);
                         client->data_size = BLOCK_DATA_SIZE(p);
