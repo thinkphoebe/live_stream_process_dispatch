@@ -14,6 +14,7 @@
 #include <netdb.h>
 #include <errno.h>
 #include <sys/epoll.h>
+#include <arpa/inet.h>
 
 #include "module.h"
 #include "module_utils.h"
@@ -168,7 +169,7 @@ static void process_event(module_resend_t *h_resend, void *block)
             {
                 return;
             }
-            memset(client, 0, *client);
+            memset(client, 0, sizeof(client_t));
 
             client->send2.sin_family = AF_INET;
             client->send2.sin_addr.s_addr = dest_ip;
@@ -354,6 +355,11 @@ static void* thread_proc(void *arg)
                         info = map_get(h_resend->info.map_data, h_resend->fdin_1);
                     else
                         info = map_get(h_resend->info.map_data, h_resend->fdin_2);
+                    if (info == NULL) //没有source的情况
+                    {
+                        close(in_fd);
+                        continue;
+                    }
                     info_resend = get_module_data(info, h_resend->info.module_id);
 
 

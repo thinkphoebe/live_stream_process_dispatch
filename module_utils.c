@@ -118,6 +118,7 @@ int serve_socket(int port)
     struct addrinfo hints;
     struct addrinfo *result, *rp;
     char port_str[16];
+    int reuse = 1;
     int fd;
     int ret;
 
@@ -149,6 +150,8 @@ int serve_socket(int port)
 
         close(fd);
     }
+
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
     if (rp == NULL)
     {
