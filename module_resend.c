@@ -52,9 +52,9 @@ typedef struct _client_t
     struct sockaddr_in send2;
 #endif
     void *block_addr;
-    int block_index;
-    int block_size;
-    int block_pos;
+    void *data_addr;
+    int data_size;
+    int data_pos;
 
     modules_data_t *p_srcinfo;
     int fd;
@@ -65,11 +65,8 @@ typedef struct _client_t
 typedef struct _info_resend
 {
     client_t *p_clients;
-
-    //简单起见使用数组，应改成链表，否则设置小了可能导致所有client被阻塞
-    void *pkgs[PKG_MAX];
-    int pkg_head;
-    int pkg_tail;
+    void *p_pkgs_head;
+    void *p_pkgs_tail;
 } info_resend_t;
 
 
@@ -80,7 +77,6 @@ static void remove_client(module_resend_t *h_resend, int fd)
     info_resend_t *info_resend;
     client_t *p, *q;
     int ret;
-    int i;
 
     memset(&event, 0, sizeof(event));
     event.data.fd = fd;
@@ -117,8 +113,15 @@ static void remove_client(module_resend_t *h_resend, int fd)
 
     if (info_resend->p_clients == NULL)
     {
-        for (i = info_resend->pkg_head; i != info_resend->pkg_tail; i = (i + 1) % PKG_MAX)
-            h_resend->info.cb_out(h_resend->info.param_out, info_resend->pkgs[i], -1);
+        void *p = info_resend->p_pkgs_head;
+        for (; info_resend->p_pkgs_head != NULL;)
+        {
+            p = info_resend->p_pkgs_head;
+            info_resend->p_pkgs_head = BLOCK_PTRNEXT(p);
+            h_resend->info.cb_out(h_resend->info.param_out, p, -1);
+        }
+        info_resend->p_pkgs_head = NULL;
+        info_resend->p_pkgs_tail = NULL;
     }
 
     map_remove(h_resend->map_out, fd);
@@ -175,11 +178,6 @@ static void process_event(module_resend_t *h_resend, void *block)
             client->send2.sin_addr.s_addr = dest_ip;
             client->send2.sin_port = dest_port;
             client->p_srcinfo = info;
-
-            client->block_addr = NULL;
-            client->block_pos = 0;
-            client->block_size = 0;
-            client->block_index = -1;
 
             client->fd = socket(AF_INET, SOCK_DGRAM, 0);
             if (client->fd < 0)
@@ -259,10 +257,12 @@ static void move_blocks(module_resend_t *h_resend)
             continue;
         }
 
-        if ((info_resend->pkg_tail + 1) % PKG_MAX == info_resend->pkg_head)
-            break;
-        info_resend->pkgs[info_resend->pkg_tail] = block;
-        info_resend->pkg_tail = (info_resend->pkg_tail + 1) % PKG_MAX;
+        if (info_resend->p_pkgs_head == NULL)
+            info_resend->p_pkgs_head = block;
+        if (info_resend->p_pkgs_tail != NULL)
+            BLOCK_PTRNEXT(info_resend->p_pkgs_tail) = block;
+        BLOCK_PTRNEXT(block) = NULL;
+        info_resend->p_pkgs_tail = block;
     }
 }
 
@@ -351,10 +351,10 @@ static void* thread_proc(void *arg)
                     //TODO: 根据请求的信息，将这个client分配到某个source. 
                     //这里测试简单起见, 记录下第一、第二个source, 随机分配到这两个
                     modules_data_t *info;
-                    if (atoi(sbuf) % 2 == 0)
+                    //if (atoi(sbuf) % 2 == 0)
                         info = map_get(h_resend->info.map_data, h_resend->fdin_1);
-                    else
-                        info = map_get(h_resend->info.map_data, h_resend->fdin_2);
+                    //else
+                    //    info = map_get(h_resend->info.map_data, h_resend->fdin_2);
                     if (info == NULL) //没有source的情况
                     {
                         close(in_fd);
@@ -371,10 +371,6 @@ static void* thread_proc(void *arg)
                     }
                     memset(client, 0, sizeof(client_t));
 
-                    client->block_addr = NULL;
-                    client->block_pos = 0;
-                    client->block_size = 0;
-                    client->block_index = -1;
                     client->p_srcinfo = info;
                     client->fd = in_fd;
 
@@ -398,14 +394,14 @@ static void* thread_proc(void *arg)
                 info = client->p_srcinfo;
                 info_resend = get_module_data(info, h_resend->info.module_id);
 
-                if (client->block_index < 0)
+                if (client->block_addr == NULL)
                 {
-                    if (info_resend->pkg_head != info_resend->pkg_tail)
+                    if (info_resend->p_pkgs_head != NULL)
                     {
-                        client->block_index = info_resend->pkg_head;
-                        client->block_addr = info_resend->pkgs[info_resend->pkg_head] + 8;
-                        client->block_size = *(int32_t *)(info_resend->pkgs[info_resend->pkg_head] + 4);
-                        client->block_pos = 0;
+                        client->block_addr = info_resend->p_pkgs_head;
+                        client->data_addr = BLOCK_DATA(info_resend->p_pkgs_head);
+                        client->data_size = BLOCK_DATA_SIZE(info_resend->p_pkgs_head);
+                        client->data_pos = 0;
                     }
                     else
                     {
@@ -413,20 +409,24 @@ static void* thread_proc(void *arg)
                         continue;
                     }
                 }
-                else if (client->block_pos >= client->block_size)
+                else if (client->data_pos >= client->data_size)
                 {
-                    if ((client->block_index + 1) % PKG_MAX != info_resend->pkg_tail)
+                    //ATTENTION: 会导致最后一个block一直无法回收?
+                    if (client->block_addr != info_resend->p_pkgs_tail)
                     {
+                        void *p = BLOCK_PTRNEXT(client->block_addr);
+
                         //检查此block是否是head，并且没有其他client在使用，是的话向下移动
-                        if (client->block_index == info_resend->pkg_head)
+                        if (client->block_addr == info_resend->p_pkgs_head)
                         {
                             int used = 0;
                             client_t *c = info_resend->p_clients;
+
                             for (; ;)
                             {
                                 if (c == NULL)
                                     break;
-                                if (c != client && c->block_index == info_resend->pkg_head)
+                                if (c != client && c->block_addr == info_resend->p_pkgs_head)
                                 {
                                     used = 1;
                                     break;
@@ -435,15 +435,20 @@ static void* thread_proc(void *arg)
                             }
                             if (used == 0)
                             {
-                                info_resend->pkg_head = (info_resend->pkg_head + 1) % PKG_MAX;
-                                h_resend->info.cb_out(h_resend->info.param_out, info_resend->pkgs[info_resend->pkg_head], -1);
+                                h_resend->info.cb_out(h_resend->info.param_out, client->block_addr, -1);
+                                info_resend->p_pkgs_head = p;
                             }
                         }
 
-                        client->block_index = (client->block_index + 1) % PKG_MAX;
-                        client->block_addr = info_resend->pkgs[client->block_index] + 8;
-                        client->block_size = *(int32_t *)(info_resend->pkgs[client->block_index] + 4);
-                        client->block_pos = 0;
+                        if (p == NULL)
+                        {
+                            printf("aaaaaaaaaaaaaaaaaaaaaaaaaaaa\n");
+                            exit(0);
+                        }
+                        client->block_addr = p;
+                        client->data_addr = BLOCK_DATA(p);
+                        client->data_size = BLOCK_DATA_SIZE(p);
+                        client->data_pos = 0;
                     }
                     else
                     {
@@ -453,12 +458,12 @@ static void* thread_proc(void *arg)
                 }
 
 #ifdef UDP
-                write_size = sendto(h_resend->events[i].data.fd, client->block_addr + client->block_pos,
-                        client->block_size - client->block_pos, 0,
+                write_size = sendto(h_resend->events[i].data.fd, client->data_addr + client->data_pos,
+                        client->data_size - client->data_pos, 0,
                         (struct sockaddr *)&client->send2, sizeof(struct sockaddr_in));
 #else
-                write_size = send(h_resend->events[i].data.fd, client->block_addr + client->block_pos,
-                        client->block_size - client->block_pos, 0);
+                write_size = send(h_resend->events[i].data.fd, client->data_addr + client->data_pos,
+                        client->data_size - client->data_pos, 0);
 #endif
                 if (write_size == -1)
                 {
@@ -481,7 +486,7 @@ static void* thread_proc(void *arg)
                 if (write_size <= 0)
                     continue;
 
-                client->block_pos += write_size;
+                client->data_pos += write_size;
             }
         }
 

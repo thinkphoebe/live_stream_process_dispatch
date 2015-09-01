@@ -25,7 +25,8 @@ extern "C" {
 //block fd为0时为event，后面4字节不是data size，是event id，再后面数据随具体event定义，但应注意不超过block_size大小
 #define BLOCK_FD(buf)           (*(int32_t *)buf)
 #define BLOCK_DATA_SIZE(buf)    (*(int32_t *)(buf + 4))
-#define BLOCK_DATA(buf)         (buf + 8)
+#define BLOCK_PTRNEXT(buf)      (*(void **)(buf + 8))
+#define BLOCK_DATA(buf)         (buf + 16)
 
 #define EVENT_SRC_ADD 0 //后面4字节为fd
 #define EVENT_SRC_DEL 1 //后面4字节为fd

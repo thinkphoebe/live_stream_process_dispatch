@@ -191,7 +191,8 @@ static void* thread_proc(void *arg)
                         read_size = 0;
                     }
 
-                    size = read(h_receive->events[i].data.fd, p_data + read_size, h_receive->block_size - read_size - 8);
+                    size = read(h_receive->events[i].data.fd, p_data + read_size, 
+                            h_receive->block_size - read_size - (BLOCK_DATA(block) - block));
                     if (size == -1)
                     {
                         //errno == EAGAIN means that we have read all data
@@ -210,7 +211,7 @@ static void* thread_proc(void *arg)
                     }
 
                     read_size += size;
-                    if (read_size >= h_receive->block_size - 8)
+                    if (read_size >= h_receive->block_size - (BLOCK_DATA(block) - block))
                     {
                         BLOCK_FD(block) = h_receive->events[i].data.fd;
                         BLOCK_DATA_SIZE(block) = read_size;
