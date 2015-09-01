@@ -41,6 +41,7 @@ static void remove_client(module_receive_t *h_receive, int fd)
     void *block;
     int ret;
 
+    memset(&event, 0, sizeof(event));
     event.data.fd = fd;
     ret = epoll_ctl(h_receive->efd, EPOLL_CTL_DEL, fd, &event);
     if (ret == -1)
@@ -128,6 +129,7 @@ static void* thread_proc(void *arg)
                         continue;
                     }
 
+                    memset(&event, 0, sizeof(event));
                     event.data.fd = in_fd;
                     event.events = EPOLLIN | EPOLLET;
                     ret = epoll_ctl(h_receive->efd, EPOLL_CTL_ADD, in_fd, &event);
@@ -138,6 +140,7 @@ static void* thread_proc(void *arg)
                         continue;
                     }
 
+                    //ATTENTION: 此处malloc的内存，在pipe line的最后一个节点module_process中释放
                     info = (modules_data_t *)malloc(sizeof(modules_data_t));
                     if (info == NULL)
                     {
@@ -155,7 +158,6 @@ static void* thread_proc(void *arg)
 
                     block = h_receive->info.cb_in(h_receive->info.param_in, -1);
                     BLOCK_FD(block) = 0;
-                    *(int32_t *)(block + 4) = EVENT_SRC_ADD;
                     *(int32_t *)(block + 4) = EVENT_SRC_ADD;
                     *(int32_t *)(block + 8) = in_fd;
                     h_receive->info.cb_out(h_receive->info.param_out, block, -1);
@@ -261,6 +263,7 @@ static void receive_destroy(module_t *h)
             usleep(10000);
     }
     printf("close thread receive ok\n");
+
     if (h_receive->sfd != 0)
         close(h_receive->sfd);
     if (h_receive->efd != 0)
@@ -311,6 +314,7 @@ module_t* module_receive_create(const module_info_t *info, int block_size, int p
         goto FAIL;
     }
 
+    memset(&event, 0, sizeof(event));
     event.data.fd = h_receive->sfd;
     event.events = EPOLLIN | EPOLLET; //读入, 边缘触发
     ret = epoll_ctl(h_receive->efd, EPOLL_CTL_ADD, h_receive->sfd, &event);

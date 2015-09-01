@@ -57,13 +57,13 @@ typedef struct _client_t
 
     modules_data_t *p_srcinfo;
     int fd;
+
+    struct _client_t *p_next;
 } client_t;
 
 typedef struct _info_resend
 {
-    //这里简单起见，使用数组，后续应改成链表
-    client_t clients[MAXCLIENTS];
-    int client_count;
+    client_t *p_clients;
 
     //简单起见使用数组，应改成链表，否则设置小了可能导致所有client被阻塞
     void *pkgs[PKG_MAX];
@@ -77,10 +77,11 @@ static void remove_client(module_resend_t *h_resend, int fd)
     struct epoll_event event;
     modules_data_t *info;
     info_resend_t *info_resend;
-    client_t *client;
+    client_t *p, *q;
     int ret;
     int i;
 
+    memset(&event, 0, sizeof(event));
     event.data.fd = fd;
     ret = epoll_ctl(h_resend->efd, EPOLL_CTL_DEL, fd, &event);
     if (ret == -1)
@@ -88,22 +89,32 @@ static void remove_client(module_resend_t *h_resend, int fd)
 
     close(fd);
 
-    client = map_get(h_resend->map_out, fd);
-    if (client == NULL)
+    p = map_get(h_resend->map_out, fd);
+    if (p == NULL)
         return;
-    info = client->p_srcinfo;
+    info = p->p_srcinfo;
     info_resend = get_module_data(info, h_resend->info.module_id);
 
-    for (i = 0; i < info_resend->client_count; i++)
+    p = NULL;
+    q = info_resend->p_clients;
+    for (; ;)
     {
-        if (&info_resend->clients[i] == client)
+        if (q == NULL)
+            break;
+        if (q->fd == fd)
         {
-            info_resend->clients[i] = info_resend->clients[info_resend->client_count - 1];
+            if (p == NULL)
+                info_resend->p_clients = NULL;
+            else
+                p->p_next = q->p_next;
+            free(q);
             break;
         }
+        p = q;
+        q = q->p_next;
     }
-    info_resend->client_count--;
-    if (info_resend->client_count == 0)
+
+    if (info_resend->p_clients == NULL)
     {
         for (i = info_resend->pkg_head; i != info_resend->pkg_tail; i = (i + 1) % PKG_MAX)
             h_resend->info.cb_out(h_resend->info.param_out, info_resend->pkgs[i], -1);
@@ -128,13 +139,10 @@ static void process_event(module_resend_t *h_resend, void *block)
         if (info_resend == NULL)
         {
         }
-        memset(info_resend, 0, sizeof(sizeof(info_resend_t)));
-        set_module_data(info, MODULE_RESEND, info_resend);
+        memset(info_resend, 0, sizeof(info_resend_t));
+        set_module_data(info, h_resend->info.module_id, info_resend);
 
 #ifdef UDP
-        if (info_resend->client_count > MAXCLIENTS)
-            return;
-
         client_t *client;
         int i;
         for (i = 0; i < 2; i++) //添加两个用做测试
@@ -155,7 +163,13 @@ static void process_event(module_resend_t *h_resend, void *block)
             else
                 dest_ip = inet_addr("127.0.0.1");
 
-            client = &info_resend->clients[i];
+            client = (client_t *)malloc(sizeof(client_t));
+            if (client == NULL)
+            {
+                return;
+            }
+            memset(client, 0, *client);
+
             client->send2.sin_family = AF_INET;
             client->send2.sin_addr.s_addr = dest_ip;
             client->send2.sin_port = dest_port;
@@ -169,24 +183,32 @@ static void process_event(module_resend_t *h_resend, void *block)
             client->fd = socket(AF_INET, SOCK_DGRAM, 0);
             if (client->fd < 0)
             {
-            }
-            info_resend->client_count += 1;
-
-
-            struct epoll_event event;
-            event.data.fd = client->fd;
-            //event.events = EPOLLOUT | EPOLLET;
-            event.events = EPOLLOUT;
-            int ret = epoll_ctl(h_resend->efd, EPOLL_CTL_ADD, client->fd, &event);
-            if (ret == -1)
-            {
-                //TODO
+                free(client);
+                return;
             }
 
             if (map_add(h_resend->map_out, client->fd, client) != 0)
             {
-                //TODO
+                close(client->fd);
+                free(client);
+                return;
             }
+
+            struct epoll_event event;
+            memset(&event, 0, sizeof(event));
+            event.data.fd = client->fd;
+            event.events = EPOLLOUT;
+            int ret = epoll_ctl(h_resend->efd, EPOLL_CTL_ADD, client->fd, &event);
+            if (ret == -1)
+            {
+                map_remove(h_resend->map_out, client->fd);
+                close(client->fd);
+                free(client);
+                return;
+            }
+
+            client->p_next = info_resend->p_clients;
+            info_resend->p_clients = client;
         }
 #else
         if (h_resend->fdin_1 == 0)
@@ -199,8 +221,8 @@ static void process_event(module_resend_t *h_resend, void *block)
     {
         printf("source %d deleted, remove its clients\n", fd);
         info_resend = get_module_data(info, h_resend->info.module_id);
-        for (; info_resend->client_count > 0;)
-            remove_client(h_resend, info_resend->clients[0].fd);
+        for (; info_resend->p_clients != NULL;)
+            remove_client(h_resend, info_resend->p_clients->fd);
         free(info_resend);
     }
 }
@@ -230,7 +252,7 @@ static void move_blocks(module_resend_t *h_resend)
         info = map_get(h_resend->info.map_data, fd);
         info_resend = get_module_data(info, h_resend->info.module_id);
 
-        if (info_resend->client_count <= 0)
+        if (info_resend->p_clients == NULL)
         {
             h_resend->info.cb_out(h_resend->info.param_out, block, -1);
             continue;
@@ -250,7 +272,7 @@ static void* thread_proc(void *arg)
     int write_size;
     modules_data_t *info;
     info_resend_t *info_resend;
-    int count, i, k;
+    int count, i;
     struct epoll_event event;
     int ret;
     int write_count;
@@ -314,6 +336,7 @@ static void* thread_proc(void *arg)
                         continue;
                     }
 
+                    memset(&event, 0, sizeof(event));
                     event.data.fd = in_fd;
                     event.events = EPOLLOUT; //ATTENTION: not add EPOLLET here
                     ret = epoll_ctl(h_resend->efd, EPOLL_CTL_ADD, in_fd, &event);
@@ -334,14 +357,14 @@ static void* thread_proc(void *arg)
                     info_resend = get_module_data(info, h_resend->info.module_id);
 
 
-                    if (info_resend->client_count > MAXCLIENTS)
+                    client_t *client = (client_t *)malloc(sizeof(client_t));
+                    if (client == NULL)
                     {
                         close(in_fd);
                         continue;
                     }
-                    client_t *client;
-                    client = &info_resend->clients[info_resend->client_count];
-                    info_resend->client_count += 1;
+                    memset(client, 0, sizeof(client_t));
+
                     client->block_addr = NULL;
                     client->block_pos = 0;
                     client->block_size = 0;
@@ -351,10 +374,12 @@ static void* thread_proc(void *arg)
 
                     if (map_add(h_resend->map_out, in_fd, client) != 0)
                     {
-                       free(info);
                        close(in_fd);
                        continue;
                     }
+
+                    client->p_next = info_resend->p_clients;
+                    info_resend->p_clients = client;
                 }
             }
             else
@@ -390,16 +415,17 @@ static void* thread_proc(void *arg)
                         if (client->block_index == info_resend->pkg_head)
                         {
                             int used = 0;
-                            for (k = 0; k < info_resend->client_count; k++)
+                            client_t *c = info_resend->p_clients;
+                            for (; ;)
                             {
-                                client_t *c = &info_resend->clients[k];
-                                if (c == client)
-                                    continue;
-                                if (c->block_index == info_resend->pkg_head)
+                                if (c == NULL)
+                                    break;
+                                if (c != client && c->block_index == info_resend->pkg_head)
                                 {
                                     used = 1;
                                     break;
                                 }
+                                c = c->p_next;
                             }
                             if (used == 0)
                             {
@@ -485,6 +511,9 @@ static void resend_destroy(module_t *h)
 {
     module_resend_t *h_resend = (module_resend_t *)h;
     void *block;
+    info_resend_t *info_resend;
+    int key;
+    void *value;
 
     if (h_resend->thrd != 0)
     {
@@ -493,6 +522,23 @@ static void resend_destroy(module_t *h)
             usleep(10000);
     }
     printf("close thread resend ok\n");
+
+    key = -1;
+    for (; ;)
+    {
+        if (map_get_next(h_resend->info.map_data, key, &key, &value) != 0)
+            break;
+        info_resend = get_module_data(value, h_resend->info.module_id);
+        free(info_resend);
+    }
+
+    key = -1;
+    for (; ;)
+    {
+        if (map_get_next(h_resend->map_out, key, &key, &value) != 0)
+            break;
+        free(value);
+    }
 
     if (h_resend->efd != 0)
         close(h_resend->efd);
@@ -556,6 +602,7 @@ module_t* module_resend_create(const module_info_t *info, int port)
         goto FAIL;
     }
 
+    memset(&event, 0, sizeof(event));
     event.data.fd = h_resend->sfd;
     event.events = EPOLLIN | EPOLLET; //读入, 边缘触发
     ret = epoll_ctl(h_resend->efd, EPOLL_CTL_ADD, h_resend->sfd, &event);

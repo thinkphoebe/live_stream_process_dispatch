@@ -93,6 +93,8 @@ static void process_destroy(module_t *h)
 {
     module_process_t *h_process = (module_process_t *)h;
     void *block;
+    int key;
+    void *value;
 
     if (h_process->thrd != 0)
     {
@@ -110,6 +112,15 @@ static void process_destroy(module_t *h)
             break;
         h_process->info.cb_out(h_process->info.param_out, block, -1);
     }
+
+    key = -1;
+    for (; ;)
+    {
+        if (map_get_next(h_process->info.map_data, key, &key, &value) != 0)
+            break;
+        free(value);
+    }
+
     free(h);
 }
 

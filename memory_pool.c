@@ -107,6 +107,7 @@ void memory_pool_destroy(memory_pool_t *h)
         free(h->p_arrays[i]);
     free(h->p_arrays);
 
+    queue_destroy(h->queue);
     free(h->queue_buf);
     free(h);
 }

@@ -90,3 +90,19 @@ void* map_get(map_t *h, int key)
     return h->keys[key];
 }
 
+
+int map_get_next(map_t *h, int curr_key, int *key, void **value)
+{
+    int k;
+    for (k = curr_key + 1; k <= h->max_key; k++)
+    {
+        if (h->keys[k] != NULL)
+        {
+            *key = k;
+            *value = h->keys[k];
+            return 0;
+        }
+    }
+    return -1;
+}
+

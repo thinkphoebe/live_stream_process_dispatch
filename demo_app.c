@@ -111,6 +111,8 @@ int main()
 
     memory_pool_destroy(memory_pool);
     map_destroy(m_map);
+    queue_destroy(queue_received);
+    queue_destroy(queue_sended);
     free(queue_received_buf);
     free(queue_sended_buf);
     return 0;
